@@ -2404,6 +2404,7 @@ async function pgClub(app) {
         <span class="tag">${e(compName(c.team.comp))}</span>
         ${c.team.city ? `<span class="tag">${e(c.team.city)}</span>` : ''}
         ${c.team.stadium ? `<span class="tag">🏟 ${e(c.team.stadium)}</span>` : ''}
+        <span class="tag" style="background:#fef3c7;color:#92400e;font-weight:800">💰 Бюджет: ${e(c.formattedBudget || ('€' + (c.budget || 0).toLocaleString('ru-RU')))}</span>
       </div>
       <h1 style="margin:0">${e(c.team.name)}</h1>
     </div>
@@ -2840,6 +2841,7 @@ async function pgAdmin(app) {
     ['players', 'Игроки'],
     ['derbies', 'Дерби'],
     ['transfers', `Трансферы${ov.transfers.length ? ' (' + ov.transfers.length + ')' : ''}`],
+    ['budget', 'Бюджет'],
     ['settings', 'Настройки']
   ];
   app.innerHTML = `<h1>Админка</h1><div class="tabs">${tabs.map(([k, t]) => `<button data-a="${k}" class="${k === AT ? 'on' : ''}">${t}</button>`).join('')}</div><div id="ab"></div>`;
@@ -3825,6 +3827,588 @@ async function pgAdmin(app) {
     });
     ab.querySelectorAll('[data-ap]').forEach(b => b.onclick = async () => { await act(() => api('/admin/transfer', { id: b.dataset.ap, approve: 1 }), 'Одобрено'); re(); });
     ab.querySelectorAll('[data-rj]').forEach(b => b.onclick = async () => { await act(() => api('/admin/transfer', { id: b.dataset.rj }), 'Отклонено'); re(); });
+  }
+  else if (AT === 'budget') {
+    const bData = await api('/admin/budgets');
+    const bTeams = bData.teams || [];
+    const bHistory = bData.history || [];
+    const rplScale = bData.rplScale || [];
+    const cupScale = bData.cupScale || {};
+    const rplStandings = bData.rplStandings || [];
+    const cupSuggestions = bData.cupSuggestions || [];
+
+    const rplTeams = bTeams.filter(t => t.comp === 'rpl');
+    const totalRplBudget = rplTeams.reduce((a, b) => a + (b.budget || 0), 0);
+    const avgRplBudget = rplTeams.length ? Math.round(totalRplBudget / rplTeams.length) : 0;
+    const richestTeam = rplTeams.length ? [...rplTeams].sort((a, b) => (b.budget || 0) - (a.budget || 0))[0] : null;
+
+    let prizeTab = 'rpl';
+    let teamFilterComp = 'rpl';
+    let teamSearchQuery = '';
+
+    function renderBudgetView() {
+      const filteredTeams = bTeams.filter(t => {
+        if (teamFilterComp !== 'all' && t.comp !== teamFilterComp) return false;
+        if (teamSearchQuery && !t.name.toLowerCase().includes(teamSearchQuery.toLowerCase())) return false;
+        return true;
+      });
+
+      ab.innerHTML = `
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px">
+          <div class="panel" style="background:#f0fdf4;border:1px solid #86efac;padding:14px;border-radius:10px">
+            <div class="muted small" style="color:#166534;font-weight:600">Суммарный фонд РПЛ</div>
+            <div style="font-size:24px;font-weight:800;color:#14532d;margin-top:4px">€${(totalRplBudget / 1_000_000).toFixed(1)}M</div>
+            <div class="small muted">Все 16 клубов лиги</div>
+          </div>
+          <div class="panel" style="background:#eff6ff;border:1px solid #93c5fd;padding:14px;border-radius:10px">
+            <div class="muted small" style="color:#1e40af;font-weight:600">Средний бюджет клуба РПЛ</div>
+            <div style="font-size:24px;font-weight:800;color:#1e3a8a;margin-top:4px">€${(avgRplBudget / 1_000_000).toFixed(1)}M</div>
+            <div class="small muted">Среднее по высшему дивизиону</div>
+          </div>
+          <div class="panel" style="background:#fffbeb;border:1px solid #fde68a;padding:14px;border-radius:10px">
+            <div class="muted small" style="color:#92400e;font-weight:600">Лидер по финансам</div>
+            <div style="font-size:22px;font-weight:800;color:#78350f;margin-top:4px;display:flex;align-items:center;gap:6px">
+              ${richestTeam?.logo ? `<img class="t-logo sm" src="${richestTeam.logo}" alt="">` : ''}
+              ${e(richestTeam?.name || '—')}
+            </div>
+            <div class="small muted">Баланс: €${((richestTeam?.budget || 0) / 1_000_000).toFixed(1)}M</div>
+          </div>
+        </div>
+
+        <div class="panel" style="border:2px solid #22c55e;box-shadow:0 4px 15px rgba(34,197,94,0.08);margin-bottom:18px">
+          <div class="row sp" style="flex-wrap:wrap;gap:10px;margin-bottom:12px;border-bottom:1px solid var(--line);padding-bottom:10px">
+            <div>
+              <h3 style="margin:0;color:#166534;display:flex;align-items:center;gap:8px">
+                <span>🏆</span> Таблица распределения призовых (конец сезона)
+              </h3>
+              <p class="muted small" style="margin:4px 0 0">
+                Заполните итоговые места клубов в РПЛ и Кубке России. Вы можете расставить клубы вручную либо нажать «Заполнить по текущей таблице РПЛ». <b>Начисление средств произойдёт только тогда, когда вы нажмёте зелёную кнопку «Начислить призовые».</b>
+              </p>
+            </div>
+            <div class="tabs" style="margin:0">
+              <button id="tab_prz_rpl" class="${prizeTab === 'rpl' ? 'on' : ''}" style="padding:6px 12px;font-weight:700">🏆 Чемпионат РПЛ (16 мест)</button>
+              <button id="tab_prz_cup" class="${prizeTab === 'cup' ? 'on' : ''}" style="padding:6px 12px;font-weight:700">🍷 Кубок России</button>
+            </div>
+          </div>
+
+          <div id="prz_rpl_box" style="display:${prizeTab === 'rpl' ? 'block' : 'none'}">
+            <div class="row sp" style="margin-bottom:12px;flex-wrap:wrap;gap:8px">
+              <div class="small muted">
+                Шкала призовых РПЛ: от <b>€13,0 млн</b> (1 место) до <b>€3,4 млн</b> (16 место).
+              </div>
+              <button class="btn sm alt" id="btn_autofill_rpl" style="font-weight:700;display:flex;align-items:center;gap:6px">
+                ⚡ Заполнить по текущей таблице РПЛ
+              </button>
+            </div>
+
+            <div class="wrap">
+              <table style="font-size:13px">
+                <thead>
+                  <tr>
+                    <th style="width:50px;text-align:center">Место</th>
+                    <th class="l" style="width:200px">Статус / Награда</th>
+                    <th class="l">Клуб (выберите или измените)</th>
+                    <th style="width:160px">Призовые (€)</th>
+                    <th class="l" style="width:140px">Сумма в млн €</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rplScale.map(item => {
+                    const defaultTeamId = rplStandings[item.place - 1]?.teamId || (rplTeams[item.place - 1]?.id || '');
+                    return `
+                      <tr>
+                        <td style="font-weight:800;text-align:center;font-size:14px">${item.place}</td>
+                        <td class="l">
+                          <span class="tag" style="background:${item.place === 1 ? '#fef08a;color:#854d0e;font-weight:800' : item.place <= 3 ? '#e0f2fe;color:#0369a1;font-weight:700' : item.place >= 15 ? '#fee2e2;color:#991b1b;font-weight:700' : '#f1f5f9'}">
+                            ${e(item.label)}
+                          </span>
+                        </td>
+                        <td class="l">
+                          <select class="rpl-prize-sel" data-place="${item.place}" style="width:100%;max-width:280px;font-weight:600">
+                            <option value="">-- Выберите клуб --</option>
+                            ${rplTeams.map(t => `<option value="${t.id}" ${t.id === defaultTeamId ? 'selected' : ''}>${e(t.name)}</option>`).join('')}
+                          </select>
+                        </td>
+                        <td>
+                          <input type="number" class="rpl-prize-amt" data-place="${item.place}" value="${item.prize}" step="100000" style="width:140px;font-weight:700;padding:4px 8px">
+                        </td>
+                        <td class="l small" id="fmt_rpl_${item.place}" style="font-weight:700;color:#166534">
+                          €${(item.prize / 1_000_000).toFixed(1)}M
+                        </td>
+                      </tr>
+                    `;
+                  }).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div id="prz_cup_box" style="display:${prizeTab === 'cup' ? 'block' : 'none'}">
+            <div class="row sp" style="margin-bottom:12px;flex-wrap:wrap;gap:8px">
+              <div class="small muted">
+                Регламент выплат: Группа (участие <b>€300K</b>, победа <b>€100K</b>) · 1/8 (<b>€110K + €125K</b>) · 1/4 (<b>€110K + €250K</b>) · 1/2 Пути РПЛ (<b>€110K + €500K</b>) · Финал (победитель <b>€1 130 000</b>, финалист <b>€380 000</b>).
+              </div>
+              <button class="btn sm alt" id="btn_autocalc_cup" style="font-weight:700;display:flex;align-items:center;gap:6px">
+                ⚡ Рассчитать по результатам матчей Кубка
+              </button>
+            </div>
+
+            <div class="wrap">
+              <table style="font-size:13px">
+                <thead>
+                  <tr>
+                    <th class="l" style="width:240px">Клуб</th>
+                    <th class="l" style="width:200px">Стадия в Кубке</th>
+                    <th style="width:110px">Побед в группе</th>
+                    <th style="width:170px">Призовые (€)</th>
+                    <th class="l">Формула и обоснование</th>
+                  </tr>
+                </thead>
+                <tbody id="cup_rows_tbody">
+                  ${cupSuggestions.map(cs => `
+                    <tr data-cup-tid="${cs.teamId}">
+                      <td class="l">
+                        <div class="row" style="gap:8px">
+                          ${cs.logo ? `<img class="t-logo xs" src="${cs.logo}" alt="">` : ''}
+                          <select class="cup-prize-sel" style="max-width:200px;font-weight:600">
+                            ${rplTeams.map(t => `<option value="${t.id}" ${t.id === cs.teamId ? 'selected' : ''}>${e(t.name)}</option>`).join('')}
+                          </select>
+                        </div>
+                      </td>
+                      <td class="l">
+                        <select class="cup-prize-stage" style="width:100%;font-size:12px">
+                          <option value="Групповой этап" ${cs.stage === 'Групповой этап' ? 'selected' : ''}>Групповой этап</option>
+                          <option value="1/8 финала" ${cs.stage === '1/8 финала' ? 'selected' : ''}>1/8 финала (+€110K)</option>
+                          <option value="1/4 финала" ${cs.stage === '1/4 финала' ? 'selected' : ''}>1/4 финала (+€220K)</option>
+                          <option value="Полуфинал Пути РПЛ" ${cs.stage === 'Полуфинал Пути РПЛ' ? 'selected' : ''}>Полуфинал Пути РПЛ (+€330K)</option>
+                          <option value="Финал (Финалист)" ${cs.stage.includes('Финалист') ? 'selected' : ''}>Финалист Кубка (+€710K)</option>
+                          <option value="Финал (Обладатель Кубка)" ${cs.stage.includes('Обладатель') || cs.stage === 'Финал Кубка России' ? 'selected' : ''}>🏆 Обладатель Кубка (+€1 460K)</option>
+                        </select>
+                      </td>
+                      <td>
+                        <input type="number" class="cup-prize-gwins" value="${cs.groupWins || 0}" min="0" max="6" style="width:70px;text-align:center;padding:4px">
+                      </td>
+                      <td>
+                        <input type="number" class="cup-prize-amt" value="${cs.prize || 300000}" step="50000" style="width:140px;font-weight:700;padding:4px 8px">
+                      </td>
+                      <td class="l small muted cup-prize-breakdown">
+                        ${e(cs.breakdown || '')}
+                      </td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+            <div>
+              <span class="small muted">Расчётная сумма выплат:</span>
+              <span id="prize_sum_preview" style="font-size:18px;font-weight:800;color:#166534;margin-left:8px">...</span>
+            </div>
+            <button class="btn" id="btn_award_prizes_submit" style="background:#16a34a;padding:12px 24px;font-size:15px;font-weight:800;box-shadow:0 4px 14px rgba(22,163,74,0.25)">
+              🏆 Начислить призовые в бюджеты клубов
+            </button>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-bottom:18px">
+          <h3>💰 Ручное пополнение или корректировка бюджета</h3>
+          <p class="muted small">Вы можете в любой момент начислить или списать произвольную сумму со счёта любого клуба (спонсорские выплаты, инвестиции владельцев, штрафы КДК и т.д.).</p>
+          <div class="row" style="gap:10px;flex-wrap:wrap;align-items:flex-end">
+            <div style="flex:2;min-width:200px">
+              <label class="small muted">Клуб</label>
+              <select id="adj_tid" style="width:100%">
+                ${bTeams.map(t => `<option value="${t.id}">${e(t.name)} (${t.comp.toUpperCase()}, баланс: €${((t.budget || 0) / 1_000_000).toFixed(2)}M)</option>`).join('')}
+              </select>
+            </div>
+            <div style="flex:1.5;min-width:160px">
+              <label class="small muted">Действие</label>
+              <select id="adj_mode" style="width:100%">
+                <option value="add">➕ Добавить к бюджету</option>
+                <option value="subtract">➖ Списать с бюджета</option>
+                <option value="set">🟰 Установить точный баланс</option>
+              </select>
+            </div>
+            <div style="flex:1.5;min-width:160px">
+              <label class="small muted">Сумма в €</label>
+              <input type="number" id="adj_amt" value="1000000" step="100000" style="width:100%">
+            </div>
+            <div style="flex:2.5;min-width:220px">
+              <label class="small muted">Обоснование / примечание</label>
+              <input id="adj_reason" placeholder="Например: Спонсорский контракт, инвестиции" style="width:100%">
+            </div>
+            <div style="padding-top:14px">
+              <button class="btn" id="adj_submit">Применить</button>
+            </div>
+          </div>
+          <div class="row" style="gap:6px;margin-top:8px">
+            <span class="small muted">Быстрый выбор:</span>
+            <button class="btn sm alt quick-amt" data-val="500000">+€500K</button>
+            <button class="btn sm alt quick-amt" data-val="1000000">+€1.0M</button>
+            <button class="btn sm alt quick-amt" data-val="3000000">+€3.0M</button>
+            <button class="btn sm alt quick-amt" data-val="5000000">+€5.0M</button>
+            <button class="btn sm alt quick-amt" data-val="10000000">+€10.0M</button>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-bottom:18px">
+          <div class="row sp" style="flex-wrap:wrap;gap:10px;margin-bottom:12px">
+            <div>
+              <h3 style="margin:0">Текущие бюджеты команд (${filteredTeams.length})</h3>
+              <p class="muted small" style="margin:4px 0 0">Актуальный финансовый баланс всех клубов лиги.</p>
+            </div>
+            <div class="row" style="gap:8px;flex-wrap:wrap">
+              <div class="tabs" style="margin:0">
+                <button class="${teamFilterComp === 'rpl' ? 'on' : ''}" data-bfilter="rpl" style="padding:4px 10px;font-size:12px">РПЛ (16)</button>
+                <button class="${teamFilterComp === 'fnl' ? 'on' : ''}" data-bfilter="fnl" style="padding:4px 10px;font-size:12px">Первая лига</button>
+                <button class="${teamFilterComp === 'all' ? 'on' : ''}" data-bfilter="all" style="padding:4px 10px;font-size:12px">Все клубы</button>
+              </div>
+              <input id="b_search" placeholder="Поиск клуба..." value="${e(teamSearchQuery)}" style="width:180px;padding:4px 8px;font-size:13px">
+            </div>
+          </div>
+
+          <div class="wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th class="l">Клуб</th>
+                  <th class="l">Лига</th>
+                  <th class="l">Город / Стадион</th>
+                  <th>Текущий бюджет</th>
+                  <th>Действие</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${filteredTeams.length ? filteredTeams.map(t => `
+                  <tr>
+                    <td class="l">
+                      <div class="row" style="gap:8px">
+                        ${t.logo ? `<img class="t-logo sm" src="${t.logo}" alt="">` : ''}
+                        <b>${e(t.name)}</b>
+                      </div>
+                    </td>
+                    <td class="l"><span class="tag">${e(t.comp.toUpperCase())}</span></td>
+                    <td class="l small muted">${e(t.city || '')} ${t.stadium ? `· ${e(t.stadium)}` : ''}</td>
+                    <td style="font-size:15px;font-weight:800;color:#15803d">
+                      €${(t.budget || 0).toLocaleString('ru-RU')}
+                    </td>
+                    <td>
+                      <button class="btn sm alt" data-edit-team="${t.id}" data-team-name="${e(t.name)}" data-team-budget="${t.budget || 0}">
+                        💰 Изменить / Пополнить
+                      </button>
+                    </td>
+                  </tr>
+                `).join('') : '<tr><td colspan="5" class="empty">Клубы не найдены</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="row sp" style="margin-bottom:12px">
+            <h3 style="margin:0">📜 История бюджета и финансовых операций (${bHistory.length})</h3>
+            <span class="muted small">Полный аудит поступлений, призовых, трансферов и списаний</span>
+          </div>
+
+          <div class="wrap">
+            <table style="font-size:12.5px">
+              <thead>
+                <tr>
+                  <th class="l">Дата</th>
+                  <th class="l">Клуб</th>
+                  <th class="l">Категория</th>
+                  <th>Сумма операции</th>
+                  <th>Баланс после</th>
+                  <th class="l">Основание / Примечание</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${bHistory.length ? bHistory.map(h => {
+                  const isPositive = (h.amount || 0) >= 0;
+                  return `
+                    <tr>
+                      <td class="l small muted">${h.date ? new Date(h.date).toLocaleDateString('ru-RU') + ' ' + new Date(h.date).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '—'}</td>
+                      <td class="l"><b>${e(h.teamName || 'Клуб')}</b></td>
+                      <td class="l">
+                        <span class="tag" style="font-size:11px;background:${h.type?.includes('prize') ? '#e0f2fe;color:#0369a1' : h.type?.includes('initial') ? '#fef3c7;color:#92400e' : h.type?.includes('transfer') ? '#f1f5f9;color:#334155' : '#f0fdf4;color:#166534'}">
+                          ${e(h.typeLabel || h.type || 'Операция')}
+                        </span>
+                      </td>
+                      <td style="font-weight:700;color:${isPositive ? '#16a34a' : '#dc2626'}">
+                        ${isPositive ? '+' : ''}€${(h.amount || 0).toLocaleString('ru-RU')}
+                      </td>
+                      <td style="font-weight:700;color:var(--ink)">
+                        €${(h.newBudget || 0).toLocaleString('ru-RU')}
+                      </td>
+                      <td class="l small muted">${e(h.description || '—')}</td>
+                    </tr>
+                  `;
+                }).join('') : '<tr><td colspan="6" class="empty">История финансовых операций пуста</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+
+      bindBudgetEvents();
+    }
+
+    function calculateTotalPrizePreview() {
+      let sum = 0;
+      ab.querySelectorAll('.rpl-prize-amt').forEach(inp => {
+        sum += Number(inp.value) || 0;
+      });
+      ab.querySelectorAll('.cup-prize-amt').forEach(inp => {
+        sum += Number(inp.value) || 0;
+      });
+      const prevEl = document.getElementById('prize_sum_preview');
+      if (prevEl) prevEl.textContent = '€' + sum.toLocaleString('ru-RU') + ` (~€${(sum / 1_000_000).toFixed(1)} млн)`;
+    }
+
+    function bindBudgetEvents() {
+      $('#tab_prz_rpl')?.addEventListener('click', () => {
+        prizeTab = 'rpl';
+        $('#prz_rpl_box').style.display = 'block';
+        $('#prz_cup_box').style.display = 'none';
+        $('#tab_prz_rpl').classList.add('on');
+        $('#tab_prz_cup').classList.remove('on');
+      });
+      $('#tab_prz_cup')?.addEventListener('click', () => {
+        prizeTab = 'cup';
+        $('#prz_rpl_box').style.display = 'none';
+        $('#prz_cup_box').style.display = 'block';
+        $('#tab_prz_cup').classList.add('on');
+        $('#tab_prz_rpl').classList.remove('on');
+      });
+
+      $('#btn_autofill_rpl')?.addEventListener('click', () => {
+        rplStandings.forEach(rs => {
+          const sel = ab.querySelector(`.rpl-prize-sel[data-place="${rs.place}"]`);
+          if (sel) sel.value = rs.teamId;
+        });
+        toast('Команды расставлены по текущей турнирной таблице РПЛ');
+      });
+
+      $('#btn_autocalc_cup')?.addEventListener('click', () => {
+        cupSuggestions.forEach(cs => {
+          const row = ab.querySelector(`tr[data-cup-tid="${cs.teamId}"]`);
+          if (row) {
+            const sel = row.querySelector('.cup-prize-sel');
+            const stage = row.querySelector('.cup-prize-stage');
+            const gwins = row.querySelector('.cup-prize-gwins');
+            const amt = row.querySelector('.cup-prize-amt');
+            const bd = row.querySelector('.cup-prize-breakdown');
+            if (sel) sel.value = cs.teamId;
+            if (stage) stage.value = cs.stage;
+            if (gwins) gwins.value = cs.groupWins;
+            if (amt) amt.value = cs.prize;
+            if (bd) bd.textContent = cs.breakdown;
+          }
+        });
+        calculateTotalPrizePreview();
+        toast('Призовые Кубка рассчитаны по результатам матчей');
+      });
+
+      ab.querySelectorAll('.rpl-prize-amt').forEach(inp => {
+        inp.oninput = () => {
+          const place = inp.dataset.place;
+          const val = Number(inp.value) || 0;
+          const fmtEl = document.getElementById(`fmt_rpl_${place}`);
+          if (fmtEl) fmtEl.textContent = `€${(val / 1_000_000).toFixed(1)}M`;
+          calculateTotalPrizePreview();
+        };
+      });
+
+      ab.querySelectorAll('.cup-prize-amt').forEach(inp => {
+        inp.oninput = calculateTotalPrizePreview;
+      });
+
+      ab.querySelectorAll('[data-bfilter]').forEach(b => {
+        b.onclick = () => {
+          teamFilterComp = b.dataset.bfilter;
+          renderBudgetView();
+        };
+      });
+
+      const searchInp = document.getElementById('b_search');
+      if (searchInp) {
+        searchInp.oninput = e => {
+          teamSearchQuery = e.target.value;
+          renderBudgetView();
+        };
+      }
+
+      ab.querySelectorAll('.quick-amt').forEach(b => {
+        b.onclick = () => {
+          const amtInp = document.getElementById('adj_amt');
+          if (amtInp) amtInp.value = b.dataset.val;
+        };
+      });
+
+      $('#adj_submit')?.addEventListener('click', async () => {
+        const teamId = $('#adj_tid').value;
+        const mode = $('#adj_mode').value;
+        const amount = $('#adj_amt').value;
+        const reason = $('#adj_reason').value;
+        const r = await act(() => api('/admin/budget/adjust', { teamId, mode, amount, reason }), 'Бюджет обновлен');
+        if (r) re();
+      });
+
+      ab.querySelectorAll('[data-edit-team]').forEach(b => {
+        b.onclick = () => {
+          const tid = b.dataset.editTeam;
+          const tname = b.dataset.teamName;
+          const tbudget = Number(b.dataset.teamBudget) || 0;
+
+          const m = modal(`
+            <h3>💰 Корректировка бюджета: ${e(tname)}</h3>
+            <div style="background:#f0fdf4;padding:10px 14px;border-radius:8px;border:1px solid #86efac;margin-bottom:14px">
+              Текущий баланс клуба: <b style="font-size:18px;color:#166534">€${tbudget.toLocaleString('ru-RU')}</b>
+            </div>
+            <label>Операция</label>
+            <select id="m_adj_mode">
+              <option value="add">➕ Добавить к бюджету (+)</option>
+              <option value="subtract">➖ Списать со счёта (-)</option>
+              <option value="set">🟰 Установить точную сумму (=)</option>
+            </select>
+            <label>Сумма в евро (€)</label>
+            <input type="number" id="m_adj_amt" value="1000000" step="100000">
+            <div class="row" style="gap:6px;margin-top:6px">
+              <button class="btn sm alt m-q-amt" data-val="500000">+500K</button>
+              <button class="btn sm alt m-q-amt" data-val="1000000">+1.0M</button>
+              <button class="btn sm alt m-q-amt" data-val="5000000">+5.0M</button>
+              <button class="btn sm alt m-q-amt" data-val="10000000">+10.0M</button>
+            </div>
+            <label>Обоснование / комментарий</label>
+            <input id="m_adj_reason" placeholder="Например: Спонсорский контракт">
+            <div class="row" style="margin-top:16px;justify-content:flex-end;gap:8px">
+              <button class="btn alt" id="m_adj_cancel">Отмена</button>
+              <button class="btn" id="m_adj_save">Сохранить</button>
+            </div>
+          `, mEl => {
+            mEl.querySelector('#m_adj_cancel').onclick = () => m.remove();
+            mEl.querySelectorAll('.m-q-amt').forEach(qb => qb.onclick = () => {
+              mEl.querySelector('#m_adj_amt').value = qb.dataset.val;
+            });
+            mEl.querySelector('#m_adj_save').onclick = async () => {
+              const mode = mEl.querySelector('#m_adj_mode').value;
+              const amount = mEl.querySelector('#m_adj_amt').value;
+              const reason = mEl.querySelector('#m_adj_reason').value;
+              const res = await act(() => api('/admin/budget/adjust', { teamId: tid, mode, amount, reason }), 'Бюджет клуба обновлён');
+              if (res) {
+                m.remove();
+                re();
+              }
+            };
+          });
+        };
+      });
+
+      $('#btn_award_prizes_submit')?.addEventListener('click', () => {
+        const rplAwards = [];
+        ab.querySelectorAll('.rpl-prize-sel').forEach(sel => {
+          const place = Number(sel.dataset.place);
+          const teamId = sel.value;
+          const amtInp = ab.querySelector(`.rpl-prize-amt[data-place="${place}"]`);
+          const prize = Number(amtInp?.value) || 0;
+          if (teamId && prize > 0) {
+            const teamObj = bTeams.find(t => t.id === teamId);
+            rplAwards.push({ place, teamId, teamName: teamObj?.name || 'Клуб', prize });
+          }
+        });
+
+        const cupAwards = [];
+        ab.querySelectorAll('#cup_rows_tbody tr').forEach(row => {
+          const sel = row.querySelector('.cup-prize-sel');
+          const stage = row.querySelector('.cup-prize-stage');
+          const gwins = row.querySelector('.cup-prize-gwins');
+          const amt = row.querySelector('.cup-prize-amt');
+          const teamId = sel?.value;
+          const prize = Number(amt?.value) || 0;
+          if (teamId && prize > 0) {
+            const teamObj = bTeams.find(t => t.id === teamId);
+            cupAwards.push({
+              teamId,
+              teamName: teamObj?.name || 'Клуб',
+              stageLabel: stage?.value || 'Кубок России',
+              wins: Number(gwins?.value) || 0,
+              prize
+            });
+          }
+        });
+
+        const totalAwards = [...rplAwards, ...cupAwards];
+        const totalPrizeSum = totalAwards.reduce((a, b) => a + b.prize, 0);
+
+        if (!totalAwards.length) {
+          toast('Выберите хотя бы один клуб для начисления', true);
+          return;
+        }
+
+        const clubMap = {};
+        for (const a of rplAwards) {
+          clubMap[a.teamId] = clubMap[a.teamId] || { name: a.teamName, rpl: 0, cup: 0, total: 0, details: [] };
+          clubMap[a.teamId].rpl += a.prize;
+          clubMap[a.teamId].total += a.prize;
+          clubMap[a.teamId].details.push(`${a.place} место РПЛ: €${(a.prize / 1_000_000).toFixed(2)}M`);
+        }
+        for (const a of cupAwards) {
+          clubMap[a.teamId] = clubMap[a.teamId] || { name: a.teamName, rpl: 0, cup: 0, total: 0, details: [] };
+          clubMap[a.teamId].cup += a.prize;
+          clubMap[a.teamId].total += a.prize;
+          clubMap[a.teamId].details.push(`Кубок (${a.stageLabel}): €${(a.prize / 1_000_000).toFixed(2)}M`);
+        }
+
+        const clubList = Object.values(clubMap).sort((a, b) => b.total - a.total);
+
+        const m = modal(`
+          <div class="row sp" style="margin-bottom:12px">
+            <h3 style="margin:0;color:#166534">🏆 Подтверждение начисления призовых</h3>
+            <button class="btn alt sm" id="m_prz_close">✕</button>
+          </div>
+          <p class="small muted">
+            Проверьте итоговые суммы. Выплат будет начислено для <b>${clubList.length} клубов</b> на общую сумму <b>€${totalPrizeSum.toLocaleString('ru-RU')}</b> (~€${(totalPrizeSum / 1_000_000).toFixed(1)} млн).
+          </p>
+          <div style="max-height:50vh;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:8px;margin:12px 0;background:#f8fafc">
+            ${clubList.map((c, i) => `
+              <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 6px;border-bottom:1px solid #e2e8f0;font-size:13px">
+                <div>
+                  <b style="font-size:14px">${i + 1}. ${e(c.name)}</b>
+                  <div class="small muted">${e(c.details.join(' + '))}</div>
+                </div>
+                <div style="font-weight:800;color:#15803d;font-size:14px">
+                  +€${c.total.toLocaleString('ru-RU')}
+                </div>
+              </div>
+            `).join('')}
+          </div>
+          <div class="warn small" style="margin-bottom:14px">
+            ⚠️ Средства будут немедленно зачислены на балансы клубов, а в журнал аудита будут добавлены официальные бухгалтерские записи.
+          </div>
+          <div class="row sp" style="margin-top:16px">
+            <button class="btn alt" id="m_prz_cancel">Отмена</button>
+            <button class="btn" id="m_prz_confirm" style="background:#16a34a;font-weight:800;padding:10px 20px">
+              ✅ Подтвердить и начислить призовые
+            </button>
+          </div>
+        `, mEl => {
+          mEl.querySelector('#m_prz_close').onclick = () => m.remove();
+          mEl.querySelector('#m_prz_cancel').onclick = () => m.remove();
+          mEl.querySelector('#m_prz_confirm').onclick = async () => {
+            const res = await act(() => api('/admin/budget/award-prizes', { rplAwards, cupAwards }), 'Призовые успешно начислены!');
+            if (res) {
+              m.remove();
+              re();
+            }
+          };
+        });
+      });
+
+      calculateTotalPrizePreview();
+    }
+
+    renderBudgetView();
   }
   else if (AT === 'settings') {
     const s = ov.settings, k = ov.keys, mo = ov.models || {};

@@ -736,6 +736,7 @@ function load() {
   }
 
   ensureInitialTransfers();
+  ensureInitialBudgets();
   save();
 }
 
@@ -872,6 +873,49 @@ function executeTransferIfBothApproved(t: any): boolean {
         impactScore: ((p.goals || 0) * 4 + (p.assists || 0) * 2.5 + (p.matches || 0) * 1.2 + ((p.rating || 7.0) >= 6.5 ? ((p.rating || 7.0) - 6.0) * 10 : 0)),
         summary: `${p.goals || 0} голов, ${p.assists || 0} ассистов в ${p.matches || 0} матчах`
       };
+
+      const feeAmt = t.feeAmount !== undefined ? t.feeAmount : parseFeeAmount(t.fee);
+      if (feeAmt && feeAmt > 0) {
+        const feeEuros = Math.round(feeAmt * 1_000_000);
+        const buyer = team(t.to);
+        const seller = team(t.from);
+        if (buyer) {
+          const prev = buyer.budget || 0;
+          buyer.budget = Math.max(0, prev - feeEuros);
+          if (!db.budgetHistory) db.budgetHistory = [];
+          db.budgetHistory.push({
+            id: uid(),
+            teamId: buyer.id,
+            teamName: buyer.name,
+            amount: -feeEuros,
+            prevBudget: prev,
+            newBudget: buyer.budget,
+            type: 'transfer_buy',
+            typeLabel: 'Покупка игрока',
+            description: `Трансфер: ${p.name} из «${seller?.name || t.fromName}» (-€${feeEuros.toLocaleString('ru-RU')})`,
+            date: new Date().toISOString(),
+            byAdmin: !!t.byAdmin
+          });
+        }
+        if (seller) {
+          const prev = seller.budget || 0;
+          seller.budget = prev + feeEuros;
+          if (!db.budgetHistory) db.budgetHistory = [];
+          db.budgetHistory.push({
+            id: uid(),
+            teamId: seller.id,
+            teamName: seller.name,
+            amount: feeEuros,
+            prevBudget: prev,
+            newBudget: seller.budget,
+            type: 'transfer_sell',
+            typeLabel: 'Продажа игрока',
+            description: `Продажа: ${p.name} в «${buyer?.name || t.toName}» (+€${feeEuros.toLocaleString('ru-RU')})`,
+            date: new Date().toISOString(),
+            byAdmin: !!t.byAdmin
+          });
+        }
+      }
     }
     return true;
   }
@@ -1191,6 +1235,172 @@ function ensureInitialTransfers() {
 
   db.transfers = seeds;
   save();
+}
+
+/* ───────── бюджеты клубов и шкала призовых (РПЛ и Кубок) ───────── */
+const INITIAL_RPL_BUDGETS: Record<string, number> = {
+  'Зенит': 45_000_000,
+  'Спартак': 30_000_000,
+  'Динамо Москва': 18_000_000,
+  'Краснодар': 15_000_000,
+  'ЦСКА': 10_500_000,
+  'Рубин': 5_000_000,
+  'Локомотив': 3_900_000,
+  'Балтика': 3_600_000,
+  'Родина': 3_000_000,
+  'Ахмат': 3_000_000,
+  'Ростов': 3_000_000,
+  'Акрон': 2_500_000,
+  'Крылья Советов': 2_000_000,
+  'Оренбург': 2_000_000,
+  'Динамо Махачкала': 1_700_000,
+  'Факел': 1_200_000
+};
+
+const RPL_PRIZE_SCALE = [
+  { place: 1, prize: 13_000_000, label: '1 место — Чемпион РПЛ' },
+  { place: 2, prize: 11_800_000, label: '2 место — Серебряный призёр' },
+  { place: 3, prize: 10_000_000, label: '3 место — Бронзовый призёр' },
+  { place: 4, prize: 9_000_000, label: '4 место' },
+  { place: 5, prize: 8_000_000, label: '5 место' },
+  { place: 6, prize: 7_000_000, label: '6 место' },
+  { place: 7, prize: 6_200_000, label: '7 место' },
+  { place: 8, prize: 5_500_000, label: '8 место' },
+  { place: 9, prize: 4_900_000, label: '9 место' },
+  { place: 10, prize: 4_400_000, label: '10 место' },
+  { place: 11, prize: 4_100_000, label: '11 место' },
+  { place: 12, prize: 3_900_000, label: '12 место' },
+  { place: 13, prize: 3_700_000, label: '13 место (Стыки)' },
+  { place: 14, prize: 3_600_000, label: '14 место (Стыки)' },
+  { place: 15, prize: 3_500_000, label: '15 место (Вылет)' },
+  { place: 16, prize: 3_400_000, label: '16 место (Вылет)' }
+];
+
+const CUP_PRIZE_SCALE = {
+  groupParticipation: 300_000, // 300 тысяч за участие в групповом этапе
+  groupWin: 100_000,           // 100 тысяч за победу в группе
+  r16Participation: 110_000,   // 110 тысяч за участие в 1/8 финала
+  r16Win: 125_000,             // 125 тысяч за победу в 1/8 финала
+  qfParticipation: 110_000,    // 110 тысяч за участие в 1/4 финала
+  qfWin: 250_000,              // 250 тысяч за победу в 1/4 финала
+  sfParticipation: 110_000,    // 110 тысяч за участие в полуфинале Пути РПЛ
+  sfWin: 500_000,              // 500 тысяч за победу в полуфинале
+  finalWinner: 1_130_000,      // 1 130 000 € для победителя финала
+  finalRunnerUp: 380_000       // 380 000 € для проигравшего финалиста
+};
+
+function ensureInitialBudgets() {
+  if (!db.budgetHistory) db.budgetHistory = [];
+
+  let changed = false;
+  for (const t of db.teams) {
+    if (t.budget === undefined || (t.budget === 0 && INITIAL_RPL_BUDGETS[t.name] !== undefined)) {
+      if (INITIAL_RPL_BUDGETS[t.name] !== undefined) {
+        t.budget = INITIAL_RPL_BUDGETS[t.name];
+      } else if (t.comp === 'fnl') {
+        t.budget = 1_000_000;
+      } else {
+        t.budget = 500_000;
+      }
+      changed = true;
+    }
+  }
+
+  if (db.budgetHistory.length === 0) {
+    const rplTeams = db.teams.filter((t: any) => t.comp === 'rpl');
+    for (const t of rplTeams) {
+      db.budgetHistory.push({
+        id: uid(),
+        teamId: t.id,
+        teamName: t.name,
+        amount: t.budget || 0,
+        prevBudget: 0,
+        newBudget: t.budget || 0,
+        type: 'initial',
+        typeLabel: 'Стартовый бюджет сезона',
+        description: `Утверждён стартовый бюджет сезона 2026/27: €${(t.budget || 0).toLocaleString('ru-RU')}`,
+        date: '2026-07-01T10:00:00.000Z',
+        byAdmin: true
+      });
+    }
+    changed = true;
+  }
+
+  if (changed) save();
+}
+
+function calculateCupPrizeSuggestions() {
+  const rplTeams = db.teams.filter((t: any) => t.comp === 'rpl');
+  const suggestions: any[] = [];
+  const cupFx = (db.fixtures || []).filter((f: any) => f.comp === 'cup');
+
+  for (const t of rplTeams) {
+    let stage = 'Групповой этап';
+    let base = CUP_PRIZE_SCALE.groupParticipation; // 300_000
+    let groupWins = 0;
+    let r16Wins = 0;
+    let qfWins = 0;
+    let sfWins = 0;
+    let isFinalWinner = false;
+    let isFinalRunnerUp = false;
+
+    // Считаем сыгранные матчи Кубка для клуба
+    for (const f of cupFx) {
+      if (f.status !== 'done') continue;
+      const isHome = f.home === t.id;
+      const isAway = f.away === t.id;
+      if (!isHome && !isAway) continue;
+
+      const teamWon = (isHome && f.homeScore > f.awayScore) || (isAway && f.awayScore > f.homeScore);
+      const isPenWon = f.penalties && ((isHome && f.homePen > f.awayPen) || (isAway && f.awayPen > f.homePen));
+      const won = teamWon || isPenWon;
+
+      const label = String(f.label || '').toLowerCase();
+      const stageField = String(f.stage || '').toLowerCase();
+
+      if (label.includes('финал') && !label.includes('1/2') && !label.includes('1/4') && !label.includes('1/8')) {
+        stage = 'Финал Кубка России';
+        if (won) isFinalWinner = true;
+        else isFinalRunnerUp = true;
+      } else if (label.includes('1/2') || stageField.includes('semi')) {
+        stage = 'Полуфинал Пути РПЛ';
+        if (won) sfWins++;
+      } else if (label.includes('1/4') || stageField.includes('quarter')) {
+        stage = '1/4 финала';
+        if (won) qfWins++;
+      } else if (label.includes('1/8') || stageField.includes('r16')) {
+        stage = '1/8 финала';
+        if (won) r16Wins++;
+      } else {
+        if (won) groupWins++;
+      }
+    }
+
+    let totalPrize = base + (groupWins * CUP_PRIZE_SCALE.groupWin);
+    if (stage === '1/8 финала') {
+      totalPrize += CUP_PRIZE_SCALE.r16Participation + (r16Wins * CUP_PRIZE_SCALE.r16Win);
+    } else if (stage === '1/4 финала') {
+      totalPrize += CUP_PRIZE_SCALE.r16Participation + CUP_PRIZE_SCALE.qfParticipation + (qfWins * CUP_PRIZE_SCALE.qfWin);
+    } else if (stage === 'Полуфинал Пути РПЛ') {
+      totalPrize += CUP_PRIZE_SCALE.r16Participation + CUP_PRIZE_SCALE.qfParticipation + CUP_PRIZE_SCALE.sfParticipation + (sfWins * CUP_PRIZE_SCALE.sfWin);
+    } else if (stage === 'Финал Кубка России') {
+      totalPrize += CUP_PRIZE_SCALE.r16Participation + CUP_PRIZE_SCALE.qfParticipation + CUP_PRIZE_SCALE.sfParticipation + (isFinalWinner ? CUP_PRIZE_SCALE.finalWinner : CUP_PRIZE_SCALE.finalRunnerUp);
+    }
+
+    suggestions.push({
+      teamId: t.id,
+      teamName: t.name,
+      logo: teamLogo(t.id),
+      stage,
+      groupWins,
+      playoffWins: r16Wins + qfWins + sfWins,
+      prize: totalPrize,
+      formattedPrize: '€' + totalPrize.toLocaleString('ru-RU'),
+      breakdown: `Участие €300K + ${groupWins} побед в группе (€${(groupWins * 100).toLocaleString('ru-RU')}K)`
+    });
+  }
+
+  return suggestions.sort((a, b) => b.prize - a.prize);
 }
 
 async function getTransferAiAdvice(t: any, p: any, fromT: any, toT: any) {
@@ -2734,7 +2944,9 @@ const pubTeam = (t: any) => {
     colors: getTeamColors(t.name),
     coach,
     synergy,
-    staff
+    staff,
+    budget: t.budget || 0,
+    formattedBudget: '€' + (t.budget || 0).toLocaleString('ru-RU')
   };
 };
 
@@ -3276,7 +3488,10 @@ app.get('/api/club', needClub, (req: any, res) => {
     })),
     transfers: db.transfers.filter((x: any) => x.to === req.tid).slice(-10),
     incomingTransfers: incoming,
-    outgoingTransfers: outgoing
+    outgoingTransfers: outgoing,
+    budget: t.budget || 0,
+    formattedBudget: '€' + (t.budget || 0).toLocaleString('ru-RU'),
+    budgetHistory: (db.budgetHistory || []).filter((h: any) => h.teamId === req.tid).slice(-20).reverse()
   });
 });
 
@@ -3788,6 +4003,174 @@ app.post('/api/admin/ask', admin, async (req, res) => {
   } catch (e: any) {
     fail(res, e.message);
   }
+});
+
+/* ───────── бюджеты команд и начисление призовых (только админ) ───────── */
+app.get('/api/admin/budgets', admin, (req, res) => {
+  ensureInitialBudgets();
+  const teams = db.teams.map((t: any) => ({
+    id: t.id,
+    name: t.name,
+    comp: t.comp,
+    city: t.city,
+    stadium: t.stadium,
+    logo: teamLogo(t.id),
+    budget: t.budget || 0,
+    formattedBudget: '€' + (t.budget || 0).toLocaleString('ru-RU')
+  })).sort((a: any, b: any) => {
+    if (a.comp === 'rpl' && b.comp !== 'rpl') return -1;
+    if (a.comp !== 'rpl' && b.comp === 'rpl') return 1;
+    return (b.budget || 0) - (a.budget || 0);
+  });
+
+  const rplStandings = table('rpl').map((row: any, idx: number) => ({
+    place: idx + 1,
+    teamId: row.id,
+    teamName: row.name,
+    logo: teamLogo(row.id),
+    points: row.pts || 0,
+    played: row.p || 0,
+    defaultPrize: RPL_PRIZE_SCALE[idx]?.prize || 3_400_000,
+    label: RPL_PRIZE_SCALE[idx]?.label || `${idx + 1} место`
+  }));
+
+  const cupSuggestions = calculateCupPrizeSuggestions();
+
+  res.json({
+    teams,
+    history: (db.budgetHistory || []).slice(-200).reverse(),
+    rplScale: RPL_PRIZE_SCALE,
+    cupScale: CUP_PRIZE_SCALE,
+    rplStandings,
+    cupSuggestions,
+    totalLeagueBudget: teams.reduce((acc: number, t: any) => acc + (t.budget || 0), 0)
+  });
+});
+
+app.post('/api/admin/budget/adjust', admin, (req, res) => {
+  ensureInitialBudgets();
+  const { teamId, amount, mode, reason } = req.body;
+  const t = team(teamId);
+  if (!t) return fail(res, 'Клуб не найден');
+  const numAmt = Number(amount);
+  if (isNaN(numAmt)) return fail(res, 'Некорректная сумма');
+
+  const prevBudget = t.budget || 0;
+  let newBudget = prevBudget;
+  let diff = 0;
+
+  if (mode === 'set') {
+    newBudget = Math.max(0, Math.round(numAmt));
+    diff = newBudget - prevBudget;
+  } else if (mode === 'subtract') {
+    diff = -Math.abs(Math.round(numAmt));
+    newBudget = Math.max(0, prevBudget + diff);
+  } else {
+    diff = Math.abs(Math.round(numAmt));
+    newBudget = prevBudget + diff;
+  }
+
+  t.budget = newBudget;
+
+  const entry = {
+    id: uid(),
+    teamId: t.id,
+    teamName: t.name,
+    amount: diff,
+    prevBudget,
+    newBudget,
+    type: 'admin_adjustment',
+    typeLabel: 'Ручная корректировка админа',
+    description: reason || (diff >= 0 ? `Пополнение бюджета: +€${Math.abs(diff).toLocaleString('ru-RU')}` : `Списание из бюджета: -€${Math.abs(diff).toLocaleString('ru-RU')}`),
+    date: new Date().toISOString(),
+    byAdmin: true
+  };
+
+  if (!db.budgetHistory) db.budgetHistory = [];
+  db.budgetHistory.push(entry);
+  save();
+
+  res.json({ ok: 1, newBudget, entry, formattedBudget: '€' + newBudget.toLocaleString('ru-RU') });
+});
+
+app.post('/api/admin/budget/award-prizes', admin, (req, res) => {
+  ensureInitialBudgets();
+  const { rplAwards, cupAwards, seasonName } = req.body;
+  const curSeason = seasonName || db.settings.season || '2026/27';
+
+  let count = 0;
+  let totalAwarded = 0;
+  const now = new Date().toISOString();
+
+  if (Array.isArray(rplAwards)) {
+    for (const aw of rplAwards) {
+      if (!aw.teamId) continue;
+      const t = team(aw.teamId);
+      const prize = Number(aw.prize);
+      if (!t || isNaN(prize) || prize <= 0) continue;
+
+      const prevBudget = t.budget || 0;
+      t.budget = prevBudget + prize;
+      const placeText = aw.place ? `${aw.place} место в РПЛ` : 'Призовые РПЛ';
+
+      if (!db.budgetHistory) db.budgetHistory = [];
+      db.budgetHistory.push({
+        id: uid(),
+        teamId: t.id,
+        teamName: t.name,
+        amount: prize,
+        prevBudget,
+        newBudget: t.budget,
+        type: 'rpl_prize',
+        typeLabel: 'Призовые РПЛ',
+        description: `Начислены призовые за ${placeText} (Сезон ${curSeason}): +€${prize.toLocaleString('ru-RU')}`,
+        date: now,
+        byAdmin: true
+      });
+      count++;
+      totalAwarded += prize;
+    }
+  }
+
+  if (Array.isArray(cupAwards)) {
+    for (const aw of cupAwards) {
+      if (!aw.teamId) continue;
+      const t = team(aw.teamId);
+      const prize = Number(aw.prize);
+      if (!t || isNaN(prize) || prize <= 0) continue;
+
+      const prevBudget = t.budget || 0;
+      t.budget = prevBudget + prize;
+      const stageText = aw.stageLabel || 'Участие в Кубке России';
+      const winsNote = aw.wins ? ` (${aw.wins} побед)` : '';
+
+      if (!db.budgetHistory) db.budgetHistory = [];
+      db.budgetHistory.push({
+        id: uid(),
+        teamId: t.id,
+        teamName: t.name,
+        amount: prize,
+        prevBudget,
+        newBudget: t.budget,
+        type: 'cup_prize',
+        typeLabel: 'Призовые Кубка России',
+        description: `Призовые Кубка России: ${stageText}${winsNote} (Сезон ${curSeason}): +€${prize.toLocaleString('ru-RU')}`,
+        date: now,
+        byAdmin: true
+      });
+      count++;
+      totalAwarded += prize;
+    }
+  }
+
+  save();
+  res.json({
+    ok: 1,
+    awardedCount: count,
+    totalAwarded,
+    formattedTotal: '€' + totalAwarded.toLocaleString('ru-RU'),
+    message: `Успешно начислены призовые для ${count} клубов на сумму €${totalAwarded.toLocaleString('ru-RU')}!`
+  });
 });
 
 /* ───────── старт и инициализация ───────── */
